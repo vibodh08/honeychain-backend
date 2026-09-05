@@ -1,5 +1,7 @@
 from datetime import date, datetime, timedelta
 import os
+import hashlib
+import json
 from io import BytesIO
 
 import qrcode
@@ -17,7 +19,7 @@ from models import HoneyBatch, User
 from supplychain import SupplyChainEvent
 
 # Blockchain
-from blockchain import verify_batch_on_blockchain
+from blockchain import verify_batch_on_blockchain, register_batch_on_blockchain
 
 
 # ============================================================
@@ -377,8 +379,62 @@ def create_batch(
     db.commit()
     db.refresh(new_batch)
 
+    # Create a deterministic hash from the important batch metadata.
+    # The hash is anchored on Sepolia so later systems can verify whether
+    # the recorded batch metadata has changed.
+    metadata = {
+        "batch_id": new_batch.batch_id,
+        "beekeeper_name": new_batch.beekeeper_name,
+        "location": new_batch.location,
+        "hive_id": new_batch.hive_id,
+        "honey_type": new_batch.honey_type,
+        "harvest_date": new_batch.harvest_date.isoformat(),
+        "quantity_kg": new_batch.quantity_kg,
+        "status": new_batch.status,
+    }
+
+    canonical_metadata = json.dumps(
+        metadata,
+        sort_keys=True,
+        separators=(",", ":")
+    )
+    metadata_hash = hashlib.sha256(
+        canonical_metadata.encode("utf-8")
+    ).hexdigest()
+
+    # Register the batch on the HoneyChain contract.
+    # The blockchain function uses BLOCKCHAIN_PRIVATE_KEY from the
+    # environment; the private key is never returned to the client.
+    try:
+        blockchain_result = register_batch_on_blockchain(
+            new_batch.batch_id,
+            metadata_hash
+        )
+    except Exception as e:
+        # Keep the database batch, but clearly report that blockchain
+        # registration failed so the frontend can show the correct state.
+        return {
+            "message": "Honey batch created, but blockchain registration failed",
+            "blockchain_registered": False,
+            "blockchain_error": str(e),
+            "batch": {
+                "batch_id": new_batch.batch_id,
+                "beekeeper_name": new_batch.beekeeper_name,
+                "location": new_batch.location,
+                "hive_id": new_batch.hive_id,
+                "honey_type": new_batch.honey_type,
+                "harvest_date": new_batch.harvest_date,
+                "quantity_kg": new_batch.quantity_kg,
+                "status": new_batch.status
+            },
+            "metadata_hash": metadata_hash,
+            "created_by": current_user.username,
+            "role": current_user.role
+        }
+
     return {
-        "message": "Honey batch created successfully",
+        "message": "Honey batch created and registered on blockchain successfully",
+        "blockchain_registered": True,
         "batch": {
             "batch_id": new_batch.batch_id,
             "beekeeper_name": new_batch.beekeeper_name,
@@ -389,6 +445,16 @@ def create_batch(
             "quantity_kg": new_batch.quantity_kg,
             "status": new_batch.status
         },
+        "metadata_hash": metadata_hash,
+        "blockchain": {
+            "network": "Sepolia Testnet",
+            "transaction_hash": blockchain_result["tx_hash"],
+            "block_number": blockchain_result["block_number"],
+            "registered_by": blockchain_result["registered_by"],
+            "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
+        },
+        "passport_url": f"{os.getenv('FRONTEND_URL', 'http://localhost:8080')}/passport/{new_batch.batch_id}",
+        "qr_url": f"/api/qr/{new_batch.batch_id}",
         "created_by": current_user.username,
         "role": current_user.role
     }
