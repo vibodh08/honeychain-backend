@@ -1,1 +1,133 @@
-  a i o h a p p y e y e b a l l s = = 2 . 7 . 1   a i o h t t p = = 3 . 1 4 . 3   a i o s i g n a l = = 1 . 4 . 0   a n n o t a t e d - d o c = = 0 . 0 . 5   a n n o t a t e d - t y p e s = = 0 . 8 . 0   a n y i o = = 4 . 1 4 . 2   a t t r s = = 2 6 . 1 . 0   b c r y p t = = 4 . 0 . 1   b i t a r r a y = = 3 . 1 1 . 0   c e r t i f i = = 2 0 2 6 . 7 . 2 2   c f f i = = 2 . 1 . 1   c h a r s e t - n o r m a l i z e r = = 3 . 5 . 1   c k z g = = 2 . 1 . 8   c l i c k = = 8 . 5 . 0   c o l o r a m a = = 0 . 4 . 6   c r y p t o g r a p h y = = 5 0 . 0 . 1   c y t o o l z = = 1 . 1 . 0   e c d s a = = 0 . 1 9 . 2   e t h - a c c o u n t = = 0 . 1 4 . 0   e t h - h a s h = = 0 . 8 . 0   e t h - k e y f i l e = = 0 . 1 0 . 0   e t h - k e y s = = 0 . 8 . 0   e t h - r l p = = 3 . 0 . 0   e t h - t y p i n g = = 6 . 0 . 0   e t h - u t i l s = = 6 . 0 . 0   e t h _ a b i = = 6 . 0 . 0   f a s t a p i = = 0 . 1 4 1 . 1   f r o z e n l i s t = = 1 . 8 . 0   g r e e n l e t = = 3 . 5 . 5   h 1 1 = = 0 . 1 6 . 0   h e x b y t e s = = 2 . 0 . 0   i d n a = = 3 . 1 9   m u l t i d i c t = = 6 . 7 . 1   p a r s i m o n i o u s = = 0 . 1 0 . 0   p a s s l i b = = 1 . 7 . 4   p i l l o w = = 1 2 . 3 . 0   p r o p c a c h e = = 0 . 5 . 2   p s y c o p g = = 3 . 3 . 5   p s y c o p g - b i n a r y = = 3 . 3 . 5   p s y c o p g 2 - b i n a r y = = 2 . 9 . 1 2   p y - e c c = = 8 . 0 . 0   p y a s n 1 = = 0 . 6 . 4   p y c p a r s e r = = 3 . 0   p y c r y p t o d o m e = = 3 . 2 3 . 0   p y d a n t i c = = 2 . 1 3 . 5   p y d a n t i c _ c o r e = = 2 . 4 6 . 5   p y t h o n - d o t e n v = = 1 . 2 . 3   p y t h o n - j o s e = = 3 . 5 . 0   p y u n o r m a l i z e = = 1 7 . 0 . 0   q r c o d e = = 8 . 2   r e g e x = = 2 0 2 6 . 9 . 3   r e q u e s t s = = 2 . 3 4 . 2   r l p = = 5 . 0 . 0   r s a = = 4 . 9 . 1   s i x = = 1 . 1 7 . 0   S Q L A l c h e m y = = 2 . 0 . 5 2   s t a r l e t t e = = 1 . 6 . 0   t o o l z = = 1 . 1 . 0   t y p i n g - i n s p e c t i o n = = 0 . 4 . 4   t y p i n g _ e x t e n s i o n s = = 4 . 1 6 . 0   t z d a t a = = 2 0 2 6 . 3   u r l l i b 3 = = 2 . 7 . 0   u v i c o r n = = 0 . 5 2 . 4   w e b 3 = = 8 . 0 . 0   w e b s o c k e t s = = 1 7 . 1   y a r l = = 1 . 2 4 . 5   
+aiohappyeyeballs==2.7.1
+
+aiohttp==3.14.3
+
+aiosignal==1.4.0
+
+annotated-doc==0.0.5
+
+annotated-types==0.8.0
+
+anyio==4.14.2
+
+attrs==26.1.0
+
+bcrypt==4.0.1
+
+bitarray==3.11.0
+
+certifi==2026.7.22
+
+cffi==2.1.1
+
+charset-normalizer==3.5.1
+
+ckzg==2.1.8
+
+click==8.5.0
+
+colorama==0.4.6
+
+cryptography==50.0.1
+
+cytoolz==1.1.0
+
+ecdsa==0.19.2
+
+eth-account==0.14.0
+
+eth-hash==0.8.0
+
+eth-keyfile==0.10.0
+
+eth-keys==0.8.0
+
+eth-rlp==3.0.0
+
+eth-typing==6.0.0
+
+eth-utils==6.0.0
+
+eth_abi==6.0.0
+
+fastapi==0.141.1
+
+frozenlist==1.8.0
+
+greenlet==3.5.5
+
+h11==0.16.0
+
+hexbytes==2.0.0
+
+idna==3.19
+
+multidict==6.7.1
+
+parsimonious==0.10.0
+
+passlib==1.7.4
+
+pillow==12.3.0
+
+propcache==0.5.2
+
+psycopg==3.3.5
+
+psycopg-binary==3.3.5
+
+psycopg2-binary==2.9.12
+
+py-ecc==8.0.0
+
+pyasn1==0.6.4
+
+pycparser==3.0
+
+pycryptodome==3.23.0
+
+pydantic==2.13.5
+
+pydantic_core==2.46.5
+
+python-dotenv==1.2.3
+
+python-jose==3.5.0
+
+pyunormalize==17.0.0
+
+qrcode==8.2
+
+regex==2026.9.3
+
+requests==2.34.2
+
+rlp==5.0.0
+
+rsa==4.9.1
+
+six==1.17.0
+
+SQLAlchemy==2.0.52
+
+starlette==1.6.0
+
+toolz==1.1.0
+
+typing-inspection==0.4.4
+
+typing_extensions==4.16.0
+
+tzdata==2026.3
+
+urllib3==2.7.0
+
+uvicorn==0.52.4
+
+web3==8.0.0
+
+websockets==17.1
+
+yarl==1.24.5
+
+
