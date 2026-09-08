@@ -927,6 +927,79 @@ def verify_blockchain(
             )
         )
 
+# ============================================================
+# TAMPER / MISMATCH DETECTION
+# ============================================================
+
+@app.get("/api/blockchain/check-integrity/{batch_id}")
+def check_batch_integrity(
+    batch_id: str,
+    db: Session = Depends(get_db)
+):
+    # Find batch in database
+    batch = db.query(HoneyBatch).filter(
+        HoneyBatch.batch_id == batch_id
+    ).first()
+
+    if not batch:
+        raise HTTPException(
+            status_code=404,
+            detail="Honey batch not found in database"
+        )
+
+    # Recreate the metadata exactly as it was hashed
+    metadata = {
+        "batch_id": batch.batch_id,
+        "beekeeper_name": batch.beekeeper_name,
+        "location": batch.location,
+        "hive_id": batch.hive_id,
+        "honey_type": batch.honey_type,
+        "harvest_date": batch.harvest_date.isoformat(),
+        "quantity_kg": batch.quantity_kg,
+        "status": batch.status,
+    }
+
+    # Create canonical JSON
+    canonical_metadata = json.dumps(
+        metadata,
+        sort_keys=True,
+        separators=(",", ":")
+    )
+
+    # Calculate current database hash
+    current_hash = hashlib.sha256(
+        canonical_metadata.encode("utf-8")
+    ).hexdigest()
+
+    # Get blockchain hash
+    try:
+        blockchain_result = verify_batch_on_blockchain(batch_id)
+
+        blockchain_hash = blockchain_result[1]
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Batch not found on blockchain: {str(e)}"
+        )
+
+    # Compare hashes
+    integrity_verified = current_hash == blockchain_hash
+
+    return {
+        "batch_id": batch_id,
+        "integrity_verified": integrity_verified,
+        "status": (
+            "VERIFIED - Data matches blockchain"
+            if integrity_verified
+            else "TAMPER DETECTED - Data does not match blockchain"
+        ),
+        "current_database_hash": current_hash,
+        "blockchain_hash": blockchain_hash,
+        "network": "Sepolia Testnet",
+        "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
+    }
+
 
 # ============================================================
 # HEALTH CHECK
