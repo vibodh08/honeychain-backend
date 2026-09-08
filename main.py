@@ -56,10 +56,11 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "https://honey-passport-trace-r51y.vercel.app",
-    ],
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "https://honey-passport-trace-r51y.vercel.app",
+    "https://honeychain-frontend.vercel.app",
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
