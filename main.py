@@ -947,7 +947,9 @@ def check_batch_integrity(
             detail="Honey batch not found in database"
         )
 
-    # Recreate the metadata exactly as it was hashed
+    # IMPORTANT:
+    # Only immutable/original batch metadata is checked.
+    # Supply-chain status changes are intentionally excluded.
     metadata = {
         "batch_id": batch.batch_id,
         "beekeeper_name": batch.beekeeper_name,
@@ -956,7 +958,6 @@ def check_batch_integrity(
         "honey_type": batch.honey_type,
         "harvest_date": batch.harvest_date.isoformat(),
         "quantity_kg": batch.quantity_kg,
-        "status": batch.status,
     }
 
     # Create canonical JSON
@@ -974,7 +975,6 @@ def check_batch_integrity(
     # Get blockchain hash
     try:
         blockchain_result = verify_batch_on_blockchain(batch_id)
-
         blockchain_hash = blockchain_result[1]
 
     except Exception as e:
@@ -999,6 +999,7 @@ def check_batch_integrity(
         "network": "Sepolia Testnet",
         "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
     }
+
 
 
 # ============================================================
