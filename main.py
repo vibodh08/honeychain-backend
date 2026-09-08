@@ -376,13 +376,9 @@ def create_batch(
         status=batch_data.status
     )
 
-    db.add(new_batch)
-    db.commit()
-    db.refresh(new_batch)
-
-    # Create a deterministic hash from the important batch metadata.
-    # The hash is anchored on Sepolia so later systems can verify whether
-    # the recorded batch metadata has changed.
+    # Create a deterministic hash from IMMUTABLE batch metadata.
+    # Supply-chain status is intentionally excluded because it changes
+    # during the lifecycle of the batch.
     metadata = {
         "batch_id": new_batch.batch_id,
         "beekeeper_name": new_batch.beekeeper_name,
@@ -391,7 +387,6 @@ def create_batch(
         "honey_type": new_batch.honey_type,
         "harvest_date": new_batch.harvest_date.isoformat(),
         "quantity_kg": new_batch.quantity_kg,
-        "status": new_batch.status,
     }
 
     canonical_metadata = json.dumps(
@@ -404,7 +399,14 @@ def create_batch(
         canonical_metadata.encode("utf-8")
     ).hexdigest()
 
-    # Register the batch on the HoneyChain contract.
+    # Store the immutable hash in PostgreSQL.
+    new_batch.metadata_hash = metadata_hash
+
+    db.add(new_batch)
+    db.commit()
+    db.refresh(new_batch)
+
+    # Register the SAME immutable hash on the HoneyChain contract.
     # The blockchain function uses BLOCKCHAIN_PRIVATE_KEY from the
     # environment; the private key is never returned to the client.
     try:
@@ -837,7 +839,8 @@ def register_existing_batch(
         # Batch not registered — continue with registration
         pass
 
-    # Recreate the exact same metadata used during batch creation
+    # Create the immutable metadata hash.
+    # Supply-chain status is intentionally excluded.
     metadata = {
         "batch_id": batch.batch_id,
         "beekeeper_name": batch.beekeeper_name,
@@ -846,7 +849,6 @@ def register_existing_batch(
         "honey_type": batch.honey_type,
         "harvest_date": batch.harvest_date.isoformat(),
         "quantity_kg": batch.quantity_kg,
-        "status": batch.status,
     }
 
     canonical_metadata = json.dumps(
@@ -858,6 +860,11 @@ def register_existing_batch(
     metadata_hash = hashlib.sha256(
         canonical_metadata.encode("utf-8")
     ).hexdigest()
+
+    # Store the immutable hash in PostgreSQL.
+    batch.metadata_hash = metadata_hash
+    db.commit()
+    db.refresh(batch)
 
     # Register on blockchain
     try:
@@ -947,9 +954,40 @@ def check_batch_integrity(
             detail="Honey batch not found in database"
         )
 
-    # IMPORTANT:
-    # Only immutable/original batch metadata is checked.
-    # Supply-chain status changes are intentionally excluded.
+    # ------------------------------------------------------------
+    # LEGACY BATCH CHECK
+    # ------------------------------------------------------------
+    # Older batches were created before metadata_hash was added.
+    # Their blockchain hash may have been generated using the old
+    # hashing format, so we don't falsely call them tampered.
+    if not batch.metadata_hash:
+        try:
+            blockchain_result = verify_batch_on_blockchain(batch_id)
+            blockchain_hash = blockchain_result[1]
+        except Exception as e:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Batch not found on blockchain: {str(e)}"
+            )
+
+        return {
+            "batch_id": batch_id,
+            "integrity_verified": False,
+            "status": "LEGACY BATCH - Immutable hash not stored in database",
+            "database_metadata_hash": None,
+            "blockchain_hash": blockchain_hash,
+            "message": (
+                "This batch was created before the immutable metadata "
+                "hash system was implemented. Create a new batch to "
+                "test full integrity verification."
+            ),
+            "network": "Sepolia Testnet",
+            "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
+        }
+
+    # ------------------------------------------------------------
+    # RECREATE HASH FROM CURRENT IMMUTABLE DATABASE DATA
+    # ------------------------------------------------------------
     metadata = {
         "batch_id": batch.batch_id,
         "beekeeper_name": batch.beekeeper_name,
@@ -960,19 +998,19 @@ def check_batch_integrity(
         "quantity_kg": batch.quantity_kg,
     }
 
-    # Create canonical JSON
     canonical_metadata = json.dumps(
         metadata,
         sort_keys=True,
         separators=(",", ":")
     )
 
-    # Calculate current database hash
     current_hash = hashlib.sha256(
         canonical_metadata.encode("utf-8")
     ).hexdigest()
 
-    # Get blockchain hash
+    # ------------------------------------------------------------
+    # GET BLOCKCHAIN HASH
+    # ------------------------------------------------------------
     try:
         blockchain_result = verify_batch_on_blockchain(batch_id)
         blockchain_hash = blockchain_result[1]
@@ -983,23 +1021,39 @@ def check_batch_integrity(
             detail=f"Batch not found on blockchain: {str(e)}"
         )
 
-    # Compare hashes
-    integrity_verified = current_hash == blockchain_hash
+    # ------------------------------------------------------------
+    # THREE-WAY INTEGRITY CHECK
+    # ------------------------------------------------------------
+    database_hash_matches = (
+        current_hash == batch.metadata_hash
+    )
+
+    blockchain_hash_matches = (
+        batch.metadata_hash == blockchain_hash
+    )
+
+    integrity_verified = (
+        database_hash_matches
+        and blockchain_hash_matches
+    )
+
+    if integrity_verified:
+        status = "VERIFIED - Database and blockchain data match"
+    else:
+        status = "TAMPER DETECTED - Data does not match blockchain"
 
     return {
         "batch_id": batch_id,
         "integrity_verified": integrity_verified,
-        "status": (
-            "VERIFIED - Data matches blockchain"
-            if integrity_verified
-            else "TAMPER DETECTED - Data does not match blockchain"
-        ),
+        "status": status,
         "current_database_hash": current_hash,
+        "stored_metadata_hash": batch.metadata_hash,
         "blockchain_hash": blockchain_hash,
+        "database_hash_matches": database_hash_matches,
+        "blockchain_hash_matches": blockchain_hash_matches,
         "network": "Sepolia Testnet",
         "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
     }
-
 
 
 # ============================================================
