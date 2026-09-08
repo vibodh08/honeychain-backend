@@ -56,11 +56,11 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "https://honey-passport-trace-r51y.vercel.app",
-    "https://honeychain-frontend.vercel.app",
-],
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "https://honey-passport-trace-r51y.vercel.app",
+        "https://honeychain-frontend.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -399,6 +399,7 @@ def create_batch(
         sort_keys=True,
         separators=(",", ":")
     )
+
     metadata_hash = hashlib.sha256(
         canonical_metadata.encode("utf-8")
     ).hexdigest()
@@ -411,7 +412,9 @@ def create_batch(
             new_batch.batch_id,
             metadata_hash
         )
+
     except Exception as e:
+
         # Keep the database batch, but clearly report that blockchain
         # registration failed so the frontend can show the correct state.
         return {
@@ -789,6 +792,103 @@ def generate_qr(
         image_bytes,
         media_type="image/png"
     )
+
+
+# ============================================================
+# REPAIR BLOCKCHAIN REGISTRATION
+# Only beekeeper/admin
+# ============================================================
+
+@app.post("/api/blockchain/register-existing/{batch_id}")
+def register_existing_batch(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role("beekeeper", "admin")
+    )
+):
+
+    # Find batch in database
+    batch = db.query(HoneyBatch).filter(
+        HoneyBatch.batch_id == batch_id
+    ).first()
+
+    if not batch:
+        raise HTTPException(
+            status_code=404,
+            detail="Honey batch not found in database"
+        )
+
+    # Check if already registered on blockchain
+    try:
+        existing = verify_batch_on_blockchain(batch_id)
+
+        if existing and existing[0] == batch_id:
+            return {
+                "message": "Batch is already registered on blockchain",
+                "blockchain_registered": True,
+                "batch_id": batch_id,
+                "metadata_hash": existing[1],
+                "registered_by": existing[2],
+                "blockchain_timestamp": existing[3]
+            }
+
+    except Exception:
+        # Batch not registered — continue with registration
+        pass
+
+    # Recreate the exact same metadata used during batch creation
+    metadata = {
+        "batch_id": batch.batch_id,
+        "beekeeper_name": batch.beekeeper_name,
+        "location": batch.location,
+        "hive_id": batch.hive_id,
+        "honey_type": batch.honey_type,
+        "harvest_date": batch.harvest_date.isoformat(),
+        "quantity_kg": batch.quantity_kg,
+        "status": batch.status,
+    }
+
+    canonical_metadata = json.dumps(
+        metadata,
+        sort_keys=True,
+        separators=(",", ":")
+    )
+
+    metadata_hash = hashlib.sha256(
+        canonical_metadata.encode("utf-8")
+    ).hexdigest()
+
+    # Register on blockchain
+    try:
+        blockchain_result = register_batch_on_blockchain(
+            batch.batch_id,
+            metadata_hash
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Blockchain registration failed: {str(e)}"
+        )
+
+    return {
+        "message": "Existing batch registered on blockchain successfully",
+        "blockchain_registered": True,
+        "batch_id": batch.batch_id,
+        "metadata_hash": metadata_hash,
+        "blockchain": {
+            "network": "Sepolia Testnet",
+            "transaction_hash": blockchain_result["tx_hash"],
+            "block_number": blockchain_result["block_number"],
+            "registered_by": blockchain_result["registered_by"],
+            "contract_address": (
+                "0x8B12321F29947DE607e16218D8A582756E77E61C"
+            )
+        },
+        "repaired_by": current_user.username,
+        "role": current_user.role
+    }
 
 
 # ============================================================
