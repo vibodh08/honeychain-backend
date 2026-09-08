@@ -1,25 +1,29 @@
-from datetime import date, datetime, timedelta
-import os
-import hashlib
 import json
-from io import BytesIO
+import hashlib
+import os
 
-import qrcode
+from datetime import date, datetime, timedelta
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
 from pydantic import BaseModel
+
 from sqlalchemy.orm import Session
+from sqlalchemy import Column, Integer, String, Date, DateTime
+
+from jose import JWTError, jwt
 from passlib.context import CryptContext
-from jose import jwt
 
 from database import engine, SessionLocal, Base
 from models import HoneyBatch, User
 from supplychain import SupplyChainEvent
 
-# Blockchain
-from blockchain import verify_batch_on_blockchain, register_batch_on_blockchain
+from blockchain import (
+    verify_batch_on_blockchain,
+    register_batch_on_blockchain,
+)
 
 
 # ============================================================
@@ -29,22 +33,13 @@ from blockchain import verify_batch_on_blockchain, register_batch_on_blockchain
 Base.metadata.create_all(bind=engine)
 
 
-def get_db():
-    db = SessionLocal()
-
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 # ============================================================
-# FASTAPI APP
+# APP
 # ============================================================
 
 app = FastAPI(
     title="HoneyChain API",
-    description="Blockchain-based honey traceability and smart beekeeping management system",
+    description="Blockchain-based honey traceability and verification system",
     version="1.0.0"
 )
 
@@ -55,12 +50,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "https://honey-passport-trace-r51y.vercel.app",
-        "https://honeychain-frontend.vercel.app",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,18 +58,26 @@ app.add_middleware(
 
 
 # ============================================================
-# AUTHENTICATION / JWT
+# JWT / AUTHENTICATION
 # ============================================================
+
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "honeychain-secret-key-change-later"
+)
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
 
 pwd_context = CryptContext(
     schemes=["bcrypt"],
     deprecated="auto"
 )
 
-SECRET_KEY = "honeychain-secret-key-change-later"
-ALGORITHM = "HS256"
-
-security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/login"
+)
 
 
 # ============================================================
@@ -97,21 +95,163 @@ ALLOWED_ROLES = {
 
 
 # ============================================================
+# DATABASE DEPENDENCY
+# ============================================================
+
+def get_db():
+
+    db = SessionLocal()
+
+    try:
+        yield db
+
+    finally:
+        db.close()
+
+
+# ============================================================
+# PASSWORD FUNCTIONS
+# ============================================================
+
+def hash_password(password: str) -> str:
+
+    return pwd_context.hash(password)
+
+
+def verify_password(
+    plain_password: str,
+    hashed_password: str
+) -> bool:
+
+    return pwd_context.verify(
+        plain_password,
+        hashed_password
+    )
+
+
+# ============================================================
+# JWT FUNCTIONS
+# ============================================================
+
+def create_access_token(
+    data: dict,
+    expires_delta: timedelta | None = None
+):
+
+    to_encode = data.copy()
+
+    if expires_delta:
+
+        expire = (
+            datetime.utcnow()
+            + expires_delta
+        )
+
+    else:
+
+        expire = (
+            datetime.utcnow()
+            + timedelta(
+                minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+            )
+        )
+
+    to_encode.update({
+        "exp": expire
+    })
+
+    return jwt.encode(
+        to_encode,
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials"
+    )
+
+    try:
+
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+
+        username = payload.get("sub")
+
+        if username is None:
+
+            raise credentials_exception
+
+    except JWTError:
+
+        raise credentials_exception
+
+    user = (
+        db.query(User)
+        .filter(
+            User.username == username
+        )
+        .first()
+    )
+
+    if user is None:
+
+        raise credentials_exception
+
+    return user
+
+
+def require_roles(*roles):
+
+    def role_checker(
+        current_user: User = Depends(
+            get_current_user
+        )
+    ):
+
+        if current_user.role not in roles:
+
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "You do not have permission "
+                    "to perform this action"
+                )
+            )
+
+        return current_user
+
+    return role_checker
+
+
+# ============================================================
 # PYDANTIC MODELS
 # ============================================================
 
 class UserRegister(BaseModel):
+
     username: str
     password: str
     role: str
 
 
 class UserLogin(BaseModel):
+
     username: str
     password: str
 
 
 class HoneyBatchCreate(BaseModel):
+
     batch_id: str
     beekeeper_name: str
     location: str
@@ -123,6 +263,7 @@ class HoneyBatchCreate(BaseModel):
 
 
 class SupplyChainEventCreate(BaseModel):
+
     batch_id: str
     event_type: str
     location: str
@@ -131,183 +272,195 @@ class SupplyChainEventCreate(BaseModel):
 
 
 # ============================================================
-# JWT FUNCTIONS
+# LAB CERTIFICATE DATABASE MODEL
 # ============================================================
 
-def create_access_token(username: str, role: str):
-    expire = datetime.utcnow() + timedelta(hours=24)
+class LabCertificate(Base):
 
-    payload = {
-        "sub": username,
-        "role": role,
-        "exp": expire
-    }
+    __tablename__ = "lab_certificates"
 
-    return jwt.encode(
-        payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True
+    )
+
+    batch_id = Column(
+        String,
+        nullable=False,
+        index=True
+    )
+
+    certificate_id = Column(
+        String,
+        nullable=False,
+        unique=True,
+        index=True
+    )
+
+    laboratory_name = Column(
+        String,
+        nullable=False
+    )
+
+    test_date = Column(
+        Date,
+        nullable=False
+    )
+
+    test_result = Column(
+        String,
+        nullable=False
+    )
+
+    quality_status = Column(
+        String,
+        nullable=False
+    )
+
+    notes = Column(
+        String,
+        nullable=True
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow
     )
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
-):
-    token = credentials.credentials
+# Create lab_certificates table
 
-    try:
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
-        )
-
-        username = payload.get("sub")
-
-        if not username:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authentication token"
-            )
-
-    except Exception:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token"
-        )
-
-    user = db.query(User).filter(
-        User.username == username
-    ).first()
-
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="User not found"
-        )
-
-    return user
+Base.metadata.create_all(bind=engine)
 
 
-def require_role(*allowed_roles):
+class LabCertificateCreate(BaseModel):
 
-    def role_checker(
-        current_user: User = Depends(get_current_user)
-    ):
-        if current_user.role not in allowed_roles:
-            raise HTTPException(
-                status_code=403,
-                detail="You do not have permission to perform this action"
-            )
-
-        return current_user
-
-    return role_checker
+    certificate_id: str
+    laboratory_name: str
+    test_date: date
+    test_result: str
+    quality_status: str
+    notes: str | None = None
 
 
 # ============================================================
-# BASIC ROUTES
+# ROOT
 # ============================================================
 
 @app.get("/")
 def root():
+
     return {
-        "message": "HoneyChain API is running",
-        "version": "1.0.0",
-        "status": "online"
+
+        "message":
+            "HoneyChain API is running",
+
+        "version":
+            "1.0.0",
+
+        "blockchain":
+            "Sepolia Testnet"
     }
 
 
-@app.get("/api/test")
-def test_api():
-    return {
-        "message": "HoneyChain backend is working"
-    }
-
-
-@app.get("/api/database-test")
-def database_test(db: Session = Depends(get_db)):
-
-    try:
-        count = db.query(HoneyBatch).count()
-
-        return {
-            "database": "connected",
-            "honey_batches": count
-        }
-
-    except Exception as e:
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database error: {str(e)}"
-        )
-
-
 # ============================================================
-# USER REGISTRATION
+# REGISTER USER
 # ============================================================
 
-@app.post("/api/auth/register")
+@app.post("/api/register")
 def register_user(
     user_data: UserRegister,
     db: Session = Depends(get_db)
 ):
 
-    # Validate role
     if user_data.role not in ALLOWED_ROLES:
+
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid role. Allowed roles: {', '.join(ALLOWED_ROLES)}"
+            detail="Invalid role"
         )
 
-    # Check existing username
-    existing_user = db.query(User).filter(
-        User.username == user_data.username
-    ).first()
+    existing_user = (
+        db.query(User)
+        .filter(
+            User.username ==
+            user_data.username
+        )
+        .first()
+    )
 
     if existing_user:
+
         raise HTTPException(
             status_code=400,
             detail="Username already exists"
         )
 
-    # Hash password
-    password_hash = pwd_context.hash(
-        user_data.password
-    )
-
     new_user = User(
-        username=user_data.username,
-        password_hash=password_hash,
-        role=user_data.role
+
+        username=
+            user_data.username,
+
+        password_hash=
+            hash_password(
+                user_data.password
+            ),
+
+        role=
+            user_data.role
     )
 
     db.add(new_user)
+
     db.commit()
+
     db.refresh(new_user)
 
     return {
-        "message": "User registered successfully",
-        "username": new_user.username,
-        "role": new_user.role
+
+        "message":
+            "User registered successfully",
+
+        "username":
+            new_user.username,
+
+        "role":
+            new_user.role
     }
 
 
 # ============================================================
-# USER LOGIN
+# LOGIN USER
+# ============================================================
+#
+# IMPORTANT:
+# OAuth2PasswordRequestForm is used here instead of
+# UserLogin so Swagger's OAuth2 Authorize button works.
+#
+# Swagger sends:
+#
+# username=...
+# password=...
+#
+# as form data.
+#
 # ============================================================
 
-@app.post("/api/auth/login")
+@app.post("/api/login")
 def login_user(
-    user_data: UserLogin,
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
 
-    user = db.query(User).filter(
-        User.username == user_data.username
-    ).first()
+    user = (
+        db.query(User)
+        .filter(
+            User.username ==
+            form_data.username
+        )
+        .first()
+    )
 
     if not user:
 
@@ -316,8 +469,8 @@ def login_user(
             detail="Invalid username or password"
         )
 
-    if not pwd_context.verify(
-        user_data.password,
+    if not verify_password(
+        form_data.password,
         user.password_hash
     ):
 
@@ -326,37 +479,57 @@ def login_user(
             detail="Invalid username or password"
         )
 
-    token = create_access_token(
-        user.username,
-        user.role
+    access_token = create_access_token(
+
+        data={
+            "sub": user.username,
+            "role": user.role
+        }
     )
 
     return {
-        "access_token": token,
-        "token_type": "bearer",
-        "username": user.username,
-        "role": user.role
+
+        "access_token":
+            access_token,
+
+        "token_type":
+            "bearer",
+
+        "username":
+            user.username,
+
+        "role":
+            user.role
     }
 
 
 # ============================================================
 # CREATE HONEY BATCH
-# Only beekeeper/admin
 # ============================================================
 
 @app.post("/api/batches")
 def create_batch(
+
     batch_data: HoneyBatchCreate,
+
     db: Session = Depends(get_db),
+
     current_user: User = Depends(
-        require_role("beekeeper", "admin")
+        require_roles(
+            "beekeeper",
+            "admin"
+        )
     )
 ):
 
-    # Check duplicate batch ID
-    existing_batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_data.batch_id
-    ).first()
+    existing_batch = (
+        db.query(HoneyBatch)
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_data.batch_id
+        )
+        .first()
+    )
 
     if existing_batch:
 
@@ -366,108 +539,168 @@ def create_batch(
         )
 
     new_batch = HoneyBatch(
-        batch_id=batch_data.batch_id,
-        beekeeper_name=batch_data.beekeeper_name,
-        location=batch_data.location,
-        hive_id=batch_data.hive_id,
-        honey_type=batch_data.honey_type,
-        harvest_date=batch_data.harvest_date,
-        quantity_kg=batch_data.quantity_kg,
-        status=batch_data.status
+
+        batch_id=
+            batch_data.batch_id,
+
+        beekeeper_name=
+            batch_data.beekeeper_name,
+
+        location=
+            batch_data.location,
+
+        hive_id=
+            batch_data.hive_id,
+
+        honey_type=
+            batch_data.honey_type,
+
+        harvest_date=
+            batch_data.harvest_date,
+
+        quantity_kg=
+            batch_data.quantity_kg,
+
+        status=
+            batch_data.status
     )
 
-    # Create a deterministic hash from IMMUTABLE batch metadata.
-    # Supply-chain status is intentionally excluded because it changes
-    # during the lifecycle of the batch.
+
+    # ========================================================
+    # IMMUTABLE METADATA
+    # ========================================================
+
     metadata = {
-        "batch_id": new_batch.batch_id,
-        "beekeeper_name": new_batch.beekeeper_name,
-        "location": new_batch.location,
-        "hive_id": new_batch.hive_id,
-        "honey_type": new_batch.honey_type,
-        "harvest_date": new_batch.harvest_date.isoformat(),
-        "quantity_kg": new_batch.quantity_kg,
+
+        "batch_id":
+            new_batch.batch_id,
+
+        "beekeeper_name":
+            new_batch.beekeeper_name,
+
+        "location":
+            new_batch.location,
+
+        "hive_id":
+            new_batch.hive_id,
+
+        "honey_type":
+            new_batch.honey_type,
+
+        "harvest_date":
+            new_batch.harvest_date.isoformat(),
+
+        "quantity_kg":
+            new_batch.quantity_kg
     }
 
+
     canonical_metadata = json.dumps(
+
         metadata,
+
         sort_keys=True,
-        separators=(",", ":")
+
+        separators=(
+            ",",
+            ":"
+        )
     )
 
+
     metadata_hash = hashlib.sha256(
-        canonical_metadata.encode("utf-8")
+
+        canonical_metadata.encode(
+            "utf-8"
+        )
+
     ).hexdigest()
 
-    # Store the immutable hash in PostgreSQL.
+
     new_batch.metadata_hash = metadata_hash
 
+
+    # Save database record
+
     db.add(new_batch)
+
     db.commit()
+
     db.refresh(new_batch)
 
-    # Register the SAME immutable hash on the HoneyChain contract.
-    # The blockchain function uses BLOCKCHAIN_PRIVATE_KEY from the
-    # environment; the private key is never returned to the client.
+
+    # ========================================================
+    # BLOCKCHAIN REGISTRATION
+    # ========================================================
+
+    blockchain_result = None
+
     try:
-        blockchain_result = register_batch_on_blockchain(
-            new_batch.batch_id,
-            metadata_hash
+
+        blockchain_result = (
+            register_batch_on_blockchain(
+                new_batch.batch_id,
+                metadata_hash
+            )
         )
 
     except Exception as e:
 
-        # Keep the database batch, but clearly report that blockchain
-        # registration failed so the frontend can show the correct state.
-        return {
-            "message": "Honey batch created, but blockchain registration failed",
-            "blockchain_registered": False,
-            "blockchain_error": str(e),
-            "batch": {
-                "batch_id": new_batch.batch_id,
-                "beekeeper_name": new_batch.beekeeper_name,
-                "location": new_batch.location,
-                "hive_id": new_batch.hive_id,
-                "honey_type": new_batch.honey_type,
-                "harvest_date": new_batch.harvest_date,
-                "quantity_kg": new_batch.quantity_kg,
-                "status": new_batch.status
-            },
-            "metadata_hash": metadata_hash,
-            "created_by": current_user.username,
-            "role": current_user.role
+        blockchain_result = {
+
+            "status":
+                "Blockchain registration failed",
+
+            "error":
+                str(e)
         }
 
+
     return {
-        "message": "Honey batch created and registered on blockchain successfully",
-        "blockchain_registered": True,
+
+        "message":
+            "Honey batch created successfully",
+
         "batch": {
-            "batch_id": new_batch.batch_id,
-            "beekeeper_name": new_batch.beekeeper_name,
-            "location": new_batch.location,
-            "hive_id": new_batch.hive_id,
-            "honey_type": new_batch.honey_type,
-            "harvest_date": new_batch.harvest_date,
-            "quantity_kg": new_batch.quantity_kg,
-            "status": new_batch.status
+
+            "id":
+                new_batch.id,
+
+            "batch_id":
+                new_batch.batch_id,
+
+            "beekeeper_name":
+                new_batch.beekeeper_name,
+
+            "location":
+                new_batch.location,
+
+            "hive_id":
+                new_batch.hive_id,
+
+            "honey_type":
+                new_batch.honey_type,
+
+            "harvest_date":
+                new_batch.harvest_date,
+
+            "quantity_kg":
+                new_batch.quantity_kg,
+
+            "status":
+                new_batch.status,
+
+            "metadata_hash":
+                new_batch.metadata_hash
         },
-        "metadata_hash": metadata_hash,
-        "blockchain": {
-            "network": "Sepolia Testnet",
-            "transaction_hash": blockchain_result["tx_hash"],
-            "block_number": blockchain_result["block_number"],
-            "registered_by": blockchain_result["registered_by"],
-            "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
-        },
-        "passport_url": f"{os.getenv('FRONTEND_URL', 'http://localhost:8080')}/passport/{new_batch.batch_id}",
-        "qr_url": f"/api/qr/{new_batch.batch_id}",
-        "created_by": current_user.username,
-        "role": current_user.role
+
+        "blockchain":
+            blockchain_result
     }
 
 
 # ============================================================
-# GET ALL HONEY BATCHES
+# GET ALL BATCHES
 # ============================================================
 
 @app.get("/api/batches")
@@ -475,165 +708,226 @@ def get_batches(
     db: Session = Depends(get_db)
 ):
 
-    batches = db.query(HoneyBatch).all()
+    batches = (
 
-    return [
-        {
-            "id": batch.id,
-            "batch_id": batch.batch_id,
-            "beekeeper_name": batch.beekeeper_name,
-            "location": batch.location,
-            "hive_id": batch.hive_id,
-            "honey_type": batch.honey_type,
-            "harvest_date": batch.harvest_date,
-            "quantity_kg": batch.quantity_kg,
-            "status": batch.status
-        }
-        for batch in batches
-    ]
+        db.query(HoneyBatch)
+
+        .order_by(
+            HoneyBatch.id.desc()
+        )
+
+        .all()
+    )
+
+    return batches
 
 
 # ============================================================
-# GET SINGLE HONEY BATCH
+# GET SINGLE BATCH
 # ============================================================
 
 @app.get("/api/batches/{batch_id}")
 def get_batch(
+
     batch_id: str,
+
     db: Session = Depends(get_db)
 ):
 
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_id
-    ).first()
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
 
     if not batch:
 
         raise HTTPException(
             status_code=404,
-            detail="Honey batch not found"
+            detail="Batch not found"
         )
 
-    return {
-        "batch_id": batch.batch_id,
-        "beekeeper_name": batch.beekeeper_name,
-        "location": batch.location,
-        "hive_id": batch.hive_id,
-        "honey_type": batch.honey_type,
-        "harvest_date": batch.harvest_date,
-        "quantity_kg": batch.quantity_kg,
-        "status": batch.status
-    }
+    return batch
 
 
 # ============================================================
-# ADD SUPPLY CHAIN EVENT
+# SUPPLY CHAIN PERMISSIONS
+# ============================================================
+
+event_permissions = {
+
+    "Harvested": [
+        "beekeeper",
+        "admin"
+    ],
+
+    "Extracted": [
+        "processor",
+        "admin"
+    ],
+
+    "Processed": [
+        "processor",
+        "admin"
+    ],
+
+    "Lab Tested": [
+        "lab",
+        "admin"
+    ],
+
+    "Bottled": [
+        "processor",
+        "admin"
+    ],
+
+    "Distributed": [
+        "distributor",
+        "admin"
+    ]
+}
+
+
+# ============================================================
+# CREATE SUPPLY CHAIN EVENT
 # ============================================================
 
 @app.post("/api/supply-chain")
-def add_supply_chain_event(
+def create_supply_chain_event(
+
     event_data: SupplyChainEventCreate,
+
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
-    # Find batch
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == event_data.batch_id
-    ).first()
+    if event_data.event_type not in event_permissions:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=(
+                "Invalid event type. "
+                "Use: Harvested, Extracted, "
+                "Processed, Lab Tested, "
+                "Bottled, Distributed"
+            )
+        )
+
+
+    allowed_roles = event_permissions[
+        event_data.event_type
+    ]
+
+
+    if current_user.role not in allowed_roles:
+
+        raise HTTPException(
+
+            status_code=403,
+
+            detail=(
+                f"Role '{current_user.role}' "
+                f"cannot create "
+                f"'{event_data.event_type}' event"
+            )
+        )
+
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            event_data.batch_id
+        )
+
+        .first()
+    )
+
 
     if not batch:
 
         raise HTTPException(
+
             status_code=404,
-            detail="Honey batch not found"
+
+            detail="Batch not found"
         )
 
-    # Permission map
-    event_permissions = {
 
-        "Harvested": [
-            "beekeeper",
-            "admin"
-        ],
+    event = SupplyChainEvent(
 
-        "Extracted": [
-            "processor",
-            "admin"
-        ],
+        batch_id=
+            event_data.batch_id,
 
-        "Processed": [
-            "processor",
-            "admin"
-        ],
+        event_type=
+            event_data.event_type,
 
-        "Lab Tested": [
-            "lab",
-            "admin"
-        ],
+        location=
+            event_data.location,
 
-        "Bottled": [
-            "processor",
-            "admin"
-        ],
+        actor=
+            event_data.actor,
 
-        "Distributed": [
-            "distributor",
-            "admin"
-        ]
-    }
-
-    # Check whether event type is valid
-    if event_data.event_type not in event_permissions:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid event type. Allowed: "
-                + ", ".join(event_permissions.keys())
-            )
-        )
-
-    # Check role
-    if current_user.role not in event_permissions[
-        event_data.event_type
-    ]:
-
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Role '{current_user.role}' "
-                f"cannot create '{event_data.event_type}' events"
-            )
-        )
-
-    # Create event
-    new_event = SupplyChainEvent(
-        batch_id=event_data.batch_id,
-        event_type=event_data.event_type,
-        location=event_data.location,
-        actor=event_data.actor,
-        notes=event_data.notes
+        notes=
+            event_data.notes
     )
 
-    db.add(new_event)
 
-    # Update batch status
-    batch.status = event_data.event_type.lower()
+    db.add(event)
+
+
+    # Update current status
+
+    batch.status = (
+        event_data.event_type.lower()
+    )
+
 
     db.commit()
-    db.refresh(new_event)
+
+    db.refresh(event)
+
 
     return {
-        "message": "Supply chain event added successfully",
+
+        "message":
+            "Supply chain event created successfully",
+
         "event": {
-            "event_id": new_event.id,
-            "batch_id": new_event.batch_id,
-            "stage": new_event.event_type,
-            "location": new_event.location,
-            "actor": new_event.actor,
-            "timestamp": new_event.timestamp,
-            "notes": new_event.notes
+
+            "event_id":
+                event.id,
+
+            "batch_id":
+                event.batch_id,
+
+            "stage":
+                event.event_type,
+
+            "location":
+                event.location,
+
+            "actor":
+                event.actor,
+
+            "timestamp":
+                event.timestamp,
+
+            "notes":
+                event.notes
         }
     }
 
@@ -644,38 +938,393 @@ def add_supply_chain_event(
 
 @app.get("/api/batches/{batch_id}/events")
 def get_supply_chain_events(
+
     batch_id: str,
+
     db: Session = Depends(get_db)
 ):
 
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_id
-    ).first()
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
 
     if not batch:
 
         raise HTTPException(
+
             status_code=404,
-            detail="Honey batch not found"
+
+            detail="Batch not found"
         )
 
-    events = db.query(SupplyChainEvent).filter(
-        SupplyChainEvent.batch_id == batch_id
-    ).order_by(
-        SupplyChainEvent.timestamp
-    ).all()
+
+    events = (
+
+        db.query(SupplyChainEvent)
+
+        .filter(
+            SupplyChainEvent.batch_id ==
+            batch_id
+        )
+
+        .order_by(
+            SupplyChainEvent.timestamp.asc()
+        )
+
+        .all()
+    )
+
 
     return [
+
         {
-            "event_id": event.id,
-            "stage": event.event_type,
-            "location": event.location,
-            "actor": event.actor,
-            "timestamp": event.timestamp,
-            "notes": event.notes
+
+            "event_id":
+                event.id,
+
+            "batch_id":
+                event.batch_id,
+
+            "stage":
+                event.event_type,
+
+            "location":
+                event.location,
+
+            "actor":
+                event.actor,
+
+            "timestamp":
+                event.timestamp,
+
+            "notes":
+                event.notes
+
         }
+
         for event in events
     ]
+
+
+# ============================================================
+# CREATE LAB CERTIFICATE
+# ============================================================
+
+@app.post("/api/batches/{batch_id}/lab-certificate")
+def create_lab_certificate(
+
+    batch_id: str,
+
+    certificate_data: LabCertificateCreate,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        require_roles(
+            "lab",
+            "admin"
+        )
+    )
+):
+
+    # --------------------------------------------------------
+    # CHECK BATCH
+    # --------------------------------------------------------
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    # --------------------------------------------------------
+    # CHECK DUPLICATE CERTIFICATE
+    # --------------------------------------------------------
+
+    existing_certificate = (
+
+        db.query(LabCertificate)
+
+        .filter(
+
+            LabCertificate.certificate_id ==
+            certificate_data.certificate_id
+
+        )
+
+        .first()
+    )
+
+
+    if existing_certificate:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail="Certificate ID already exists"
+        )
+
+
+    # --------------------------------------------------------
+    # CREATE CERTIFICATE
+    # --------------------------------------------------------
+
+    certificate = LabCertificate(
+
+        batch_id=
+            batch_id,
+
+        certificate_id=
+            certificate_data.certificate_id,
+
+        laboratory_name=
+            certificate_data.laboratory_name,
+
+        test_date=
+            certificate_data.test_date,
+
+        test_result=
+            certificate_data.test_result,
+
+        quality_status=
+            certificate_data.quality_status,
+
+        notes=
+            certificate_data.notes
+    )
+
+
+    db.add(certificate)
+
+
+    # --------------------------------------------------------
+    # CHECK EXISTING LAB EVENT
+    # --------------------------------------------------------
+
+    existing_lab_event = (
+
+        db.query(SupplyChainEvent)
+
+        .filter(
+
+            SupplyChainEvent.batch_id ==
+            batch_id,
+
+            SupplyChainEvent.event_type ==
+            "Lab Tested"
+
+        )
+
+        .first()
+    )
+
+
+    # --------------------------------------------------------
+    # AUTOMATIC LAB TESTED EVENT
+    # --------------------------------------------------------
+
+    if not existing_lab_event:
+
+        lab_event = SupplyChainEvent(
+
+            batch_id=
+                batch_id,
+
+            event_type=
+                "Lab Tested",
+
+            location=
+                certificate_data.laboratory_name,
+
+            actor=
+                current_user.username,
+
+            notes=(
+
+                f"Certificate: "
+                f"{certificate_data.certificate_id} | "
+
+                f"Result: "
+                f"{certificate_data.test_result} | "
+
+                f"Quality: "
+                f"{certificate_data.quality_status}"
+            )
+        )
+
+
+        db.add(lab_event)
+
+
+        batch.status = "lab tested"
+
+
+    db.commit()
+
+    db.refresh(certificate)
+
+
+    return {
+
+        "message":
+            "Lab certificate added successfully",
+
+        "certificate": {
+
+            "id":
+                certificate.id,
+
+            "batch_id":
+                certificate.batch_id,
+
+            "certificate_id":
+                certificate.certificate_id,
+
+            "laboratory_name":
+                certificate.laboratory_name,
+
+            "test_date":
+                certificate.test_date,
+
+            "test_result":
+                certificate.test_result,
+
+            "quality_status":
+                certificate.quality_status,
+
+            "notes":
+                certificate.notes,
+
+            "created_at":
+                certificate.created_at
+        }
+    }
+
+
+# ============================================================
+# GET LAB CERTIFICATE
+# ============================================================
+
+@app.get("/api/batches/{batch_id}/lab-certificate")
+def get_lab_certificate(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    certificate = (
+
+        db.query(LabCertificate)
+
+        .filter(
+            LabCertificate.batch_id ==
+            batch_id
+        )
+
+        .order_by(
+            LabCertificate.id.desc()
+        )
+
+        .first()
+    )
+
+
+    if not certificate:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail=(
+                "No lab certificate found "
+                "for this batch"
+            )
+        )
+
+
+    return {
+
+        "certificate": {
+
+            "id":
+                certificate.id,
+
+            "batch_id":
+                certificate.batch_id,
+
+            "certificate_id":
+                certificate.certificate_id,
+
+            "laboratory_name":
+                certificate.laboratory_name,
+
+            "test_date":
+                certificate.test_date,
+
+            "test_result":
+                certificate.test_result,
+
+            "quality_status":
+                certificate.quality_status,
+
+            "notes":
+                certificate.notes,
+
+            "created_at":
+                certificate.created_at
+        }
+    }
 
 
 # ============================================================
@@ -684,375 +1333,737 @@ def get_supply_chain_events(
 
 @app.get("/api/passport/{batch_id}")
 def get_honey_passport(
+
     batch_id: str,
+
     db: Session = Depends(get_db)
 ):
 
-    # Find batch
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_id
-    ).first()
+    # --------------------------------------------------------
+    # GET BATCH
+    # --------------------------------------------------------
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
 
     if not batch:
 
         raise HTTPException(
+
             status_code=404,
-            detail="Honey batch not found"
+
+            detail="Batch not found"
         )
 
-    # Get supply chain
-    events = db.query(SupplyChainEvent).filter(
-        SupplyChainEvent.batch_id == batch_id
-    ).order_by(
-        SupplyChainEvent.timestamp
-    ).all()
 
-    passport = {
-        "batch_id": batch.batch_id,
-        "beekeeper": batch.beekeeper_name,
-        "origin": batch.location,
-        "hive_id": batch.hive_id,
-        "honey_type": batch.honey_type,
-        "harvest_date": batch.harvest_date,
-        "quantity_kg": batch.quantity_kg,
-        "status": batch.status
-    }
+    # --------------------------------------------------------
+    # SUPPLY CHAIN
+    # --------------------------------------------------------
+
+    events = (
+
+        db.query(SupplyChainEvent)
+
+        .filter(
+            SupplyChainEvent.batch_id ==
+            batch_id
+        )
+
+        .order_by(
+            SupplyChainEvent.timestamp.asc()
+        )
+
+        .all()
+    )
+
 
     supply_chain = [
+
         {
-            "event_id": event.id,
-            "stage": event.event_type,
-            "location": event.location,
-            "actor": event.actor,
-            "timestamp": event.timestamp,
-            "notes": event.notes
+
+            "event_id":
+                event.id,
+
+            "stage":
+                event.event_type,
+
+            "location":
+                event.location,
+
+            "actor":
+                event.actor,
+
+            "timestamp":
+                event.timestamp,
+
+            "notes":
+                event.notes
+
         }
+
         for event in events
     ]
 
-    return {
-        "passport": passport,
-        "supply_chain": supply_chain
-    }
 
+    # --------------------------------------------------------
+    # LAB CERTIFICATE
+    # --------------------------------------------------------
 
-# ============================================================
-# GENERATE QR CODE
-# ============================================================
+    certificate = (
 
-@app.get("/api/qr/{batch_id}")
-def generate_qr(
-    batch_id: str,
-    db: Session = Depends(get_db)
-):
+        db.query(LabCertificate)
 
-    # Check batch exists
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_id
-    ).first()
-
-    if not batch:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Honey batch not found"
+        .filter(
+            LabCertificate.batch_id ==
+            batch_id
         )
 
-    # Frontend URL
-    frontend_url = os.getenv(
-        "FRONTEND_URL",
-        "http://localhost:8080"
+        .order_by(
+            LabCertificate.id.desc()
+        )
+
+        .first()
     )
 
-    # Passport URL
-    passport_url = (
-        f"{frontend_url}/passport/{batch_id}"
-    )
 
-    # Generate QR
-    qr = qrcode.QRCode(
-        version=1,
-        box_size=10,
-        border=4
-    )
+    lab_certificate = None
 
-    qr.add_data(passport_url)
-    qr.make(fit=True)
 
-    qr_image = qr.make_image()
+    if certificate:
 
-    image_bytes = BytesIO()
+        lab_certificate = {
 
-    qr_image.save(
-        image_bytes,
-        format="PNG"
-    )
+            "certificate_id":
+                certificate.certificate_id,
 
-    image_bytes.seek(0)
+            "laboratory_name":
+                certificate.laboratory_name,
 
-    return StreamingResponse(
-        image_bytes,
-        media_type="image/png"
-    )
+            "test_date":
+                certificate.test_date,
+
+            "test_result":
+                certificate.test_result,
+
+            "quality_status":
+                certificate.quality_status,
+
+            "notes":
+                certificate.notes,
+
+            "created_at":
+                certificate.created_at
+        }
+
+
+    # --------------------------------------------------------
+    # BLOCKCHAIN
+    # --------------------------------------------------------
+
+    blockchain_data = None
+
+
+    try:
+
+        blockchain_data = (
+
+            verify_batch_on_blockchain(
+                batch_id
+            )
+        )
+
+
+    except Exception as e:
+
+        blockchain_data = {
+
+            "verified":
+                False,
+
+            "error":
+                str(e)
+        }
+
+
+    # --------------------------------------------------------
+    # FINAL PASSPORT
+    # --------------------------------------------------------
+
+    return {
+
+        "passport": {
+
+            "batch_id":
+                batch.batch_id,
+
+            "beekeeper_name":
+                batch.beekeeper_name,
+
+            "location":
+                batch.location,
+
+            "hive_id":
+                batch.hive_id,
+
+            "honey_type":
+                batch.honey_type,
+
+            "harvest_date":
+                batch.harvest_date,
+
+            "quantity_kg":
+                batch.quantity_kg,
+
+            "status":
+                batch.status,
+
+            "metadata_hash":
+                batch.metadata_hash,
+
+            "lab_certificate":
+                lab_certificate,
+
+            "blockchain":
+                blockchain_data
+        },
+
+        "supply_chain":
+            supply_chain
+    }
 
 
 # ============================================================
 # REPAIR BLOCKCHAIN REGISTRATION
-# Only beekeeper/admin
 # ============================================================
 
-@app.post("/api/blockchain/register-existing/{batch_id}")
-def register_existing_batch(
+@app.post("/api/batches/{batch_id}/repair-blockchain")
+def repair_blockchain_registration(
+
     batch_id: str,
+
     db: Session = Depends(get_db),
+
     current_user: User = Depends(
-        require_role("beekeeper", "admin")
+        require_roles(
+            "beekeeper",
+            "admin"
+        )
     )
 ):
 
-    # Find batch in database
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_id
-    ).first()
+    batch = (
 
-    if not batch:
-        raise HTTPException(
-            status_code=404,
-            detail="Honey batch not found in database"
-        )
+        db.query(HoneyBatch)
 
-    # Check if already registered on blockchain
-    try:
-        existing = verify_batch_on_blockchain(batch_id)
-
-        if existing and existing[0] == batch_id:
-            return {
-                "message": "Batch is already registered on blockchain",
-                "blockchain_registered": True,
-                "batch_id": batch_id,
-                "metadata_hash": existing[1],
-                "registered_by": existing[2],
-                "blockchain_timestamp": existing[3]
-            }
-
-    except Exception:
-        # Batch not registered — continue with registration
-        pass
-
-    # Create the immutable metadata hash.
-    # Supply-chain status is intentionally excluded.
-    metadata = {
-        "batch_id": batch.batch_id,
-        "beekeeper_name": batch.beekeeper_name,
-        "location": batch.location,
-        "hive_id": batch.hive_id,
-        "honey_type": batch.honey_type,
-        "harvest_date": batch.harvest_date.isoformat(),
-        "quantity_kg": batch.quantity_kg,
-    }
-
-    canonical_metadata = json.dumps(
-        metadata,
-        sort_keys=True,
-        separators=(",", ":")
-    )
-
-    metadata_hash = hashlib.sha256(
-        canonical_metadata.encode("utf-8")
-    ).hexdigest()
-
-    # Store the immutable hash in PostgreSQL.
-    batch.metadata_hash = metadata_hash
-    db.commit()
-    db.refresh(batch)
-
-    # Register on blockchain
-    try:
-        blockchain_result = register_batch_on_blockchain(
-            batch.batch_id,
-            metadata_hash
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Blockchain registration failed: {str(e)}"
-        )
-
-    return {
-        "message": "Existing batch registered on blockchain successfully",
-        "blockchain_registered": True,
-        "batch_id": batch.batch_id,
-        "metadata_hash": metadata_hash,
-        "blockchain": {
-            "network": "Sepolia Testnet",
-            "transaction_hash": blockchain_result["tx_hash"],
-            "block_number": blockchain_result["block_number"],
-            "registered_by": blockchain_result["registered_by"],
-            "contract_address": (
-                "0x8B12321F29947DE607e16218D8A582756E77E61C"
-            )
-        },
-        "repaired_by": current_user.username,
-        "role": current_user.role
-    }
-
-
-# ============================================================
-# BLOCKCHAIN VERIFICATION
-# ============================================================
-
-@app.get("/api/blockchain/verify/{batch_id}")
-def verify_blockchain(
-    batch_id: str
-):
-
-    try:
-
-        result = verify_batch_on_blockchain(
+        .filter(
+            HoneyBatch.batch_id ==
             batch_id
         )
 
-        return {
-            "verified": True,
-            "batch_id": result[0],
-            "metadata_hash": result[1],
-            "registered_by": result[2],
-            "blockchain_timestamp": result[3],
-            "network": "Sepolia Testnet",
-            "contract_address": (
-                "0x8B12321F29947DE607e16218D8A582756E77E61C"
-            )
-        }
+        .first()
+    )
 
-    except Exception as e:
-
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Batch not found on blockchain: {str(e)}"
-            )
-        )
-
-# ============================================================
-# TAMPER / MISMATCH DETECTION
-# ============================================================
-
-@app.get("/api/blockchain/check-integrity/{batch_id}")
-def check_batch_integrity(
-    batch_id: str,
-    db: Session = Depends(get_db)
-):
-    # Find batch in database
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.batch_id == batch_id
-    ).first()
 
     if not batch:
+
         raise HTTPException(
+
             status_code=404,
-            detail="Honey batch not found in database"
+
+            detail="Batch not found"
         )
 
-    # ------------------------------------------------------------
-    # LEGACY BATCH CHECK
-    # ------------------------------------------------------------
-    # Older batches were created before metadata_hash was added.
-    # Their blockchain hash may have been generated using the old
-    # hashing format, so we don't falsely call them tampered.
-    if not batch.metadata_hash:
-        try:
-            blockchain_result = verify_batch_on_blockchain(batch_id)
-            blockchain_hash = blockchain_result[1]
-        except Exception as e:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Batch not found on blockchain: {str(e)}"
-            )
 
-        return {
-            "batch_id": batch_id,
-            "integrity_verified": False,
-            "status": "LEGACY BATCH - Immutable hash not stored in database",
-            "database_metadata_hash": None,
-            "blockchain_hash": blockchain_hash,
-            "message": (
-                "This batch was created before the immutable metadata "
-                "hash system was implemented. Create a new batch to "
-                "test full integrity verification."
-            ),
-            "network": "Sepolia Testnet",
-            "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
+    # --------------------------------------------------------
+    # RECOVER METADATA HASH
+    # --------------------------------------------------------
+
+    if not batch.metadata_hash:
+
+        metadata = {
+
+            "batch_id":
+                batch.batch_id,
+
+            "beekeeper_name":
+                batch.beekeeper_name,
+
+            "location":
+                batch.location,
+
+            "hive_id":
+                batch.hive_id,
+
+            "honey_type":
+                batch.honey_type,
+
+            "harvest_date":
+                batch.harvest_date.isoformat(),
+
+            "quantity_kg":
+                batch.quantity_kg
         }
 
-    # ------------------------------------------------------------
-    # RECREATE HASH FROM CURRENT IMMUTABLE DATABASE DATA
-    # ------------------------------------------------------------
-    metadata = {
-        "batch_id": batch.batch_id,
-        "beekeeper_name": batch.beekeeper_name,
-        "location": batch.location,
-        "hive_id": batch.hive_id,
-        "honey_type": batch.honey_type,
-        "harvest_date": batch.harvest_date.isoformat(),
-        "quantity_kg": batch.quantity_kg,
-    }
 
-    canonical_metadata = json.dumps(
-        metadata,
-        sort_keys=True,
-        separators=(",", ":")
-    )
+        canonical_metadata = json.dumps(
 
-    current_hash = hashlib.sha256(
-        canonical_metadata.encode("utf-8")
-    ).hexdigest()
+            metadata,
 
-    # ------------------------------------------------------------
-    # GET BLOCKCHAIN HASH
-    # ------------------------------------------------------------
-    try:
-        blockchain_result = verify_batch_on_blockchain(batch_id)
-        blockchain_hash = blockchain_result[1]
+            sort_keys=True,
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Batch not found on blockchain: {str(e)}"
+            separators=(
+                ",",
+                ":"
+            )
         )
 
-    # ------------------------------------------------------------
-    # THREE-WAY INTEGRITY CHECK
-    # ------------------------------------------------------------
-    database_hash_matches = (
-        current_hash == batch.metadata_hash
+
+        batch.metadata_hash = hashlib.sha256(
+
+            canonical_metadata.encode(
+                "utf-8"
+            )
+
+        ).hexdigest()
+
+
+        db.commit()
+
+
+    # --------------------------------------------------------
+    # REGISTER
+    # --------------------------------------------------------
+
+    try:
+
+        blockchain_result = (
+
+            register_batch_on_blockchain(
+
+                batch.batch_id,
+
+                batch.metadata_hash
+            )
+        )
+
+
+    except Exception as e:
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail=str(e)
+        )
+
+
+    return {
+
+        "message":
+            "Blockchain registration submitted",
+
+        "batch_id":
+            batch.batch_id,
+
+        "metadata_hash":
+            batch.metadata_hash,
+
+        "repaired_by":
+            current_user.username,
+
+        "blockchain":
+            blockchain_result
+    }
+
+
+# ============================================================
+# VERIFY BATCH ON BLOCKCHAIN
+# ============================================================
+
+@app.get("/api/batches/{batch_id}/blockchain")
+def verify_batch_blockchain(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
     )
 
-    blockchain_hash_matches = (
-        batch.metadata_hash == blockchain_hash
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    try:
+
+        blockchain_result = (
+
+            verify_batch_on_blockchain(
+                batch_id
+            )
+        )
+
+
+    except Exception as e:
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail=str(e)
+        )
+
+
+    return {
+
+        "batch_id":
+            batch_id,
+
+        "database_metadata_hash":
+            batch.metadata_hash,
+
+        "blockchain":
+            blockchain_result
+    }
+
+
+# ============================================================
+# TAMPER / INTEGRITY CHECK
+# ============================================================
+
+@app.get("/api/batches/{batch_id}/integrity")
+def check_batch_integrity(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
+
+    # --------------------------------------------------------
+    # GET BATCH
+    # --------------------------------------------------------
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
     )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    # --------------------------------------------------------
+    # LEGACY BATCH
+    # --------------------------------------------------------
+
+    if not batch.metadata_hash:
+
+        return {
+
+            "batch_id":
+                batch_id,
+
+            "integrity_verified":
+                False,
+
+            "status":
+                (
+                    "LEGACY BATCH - "
+                    "Immutable hash not stored "
+                    "in database"
+                ),
+
+            "current_database_hash":
+                None,
+
+            "stored_metadata_hash":
+                None,
+
+            "blockchain_hash":
+                None,
+
+            "database_hash_matches":
+                False,
+
+            "blockchain_hash_matches":
+                False
+        }
+
+
+    # --------------------------------------------------------
+    # RECREATE CURRENT METADATA
+    # --------------------------------------------------------
+
+    current_metadata = {
+
+        "batch_id":
+            batch.batch_id,
+
+        "beekeeper_name":
+            batch.beekeeper_name,
+
+        "location":
+            batch.location,
+
+        "hive_id":
+            batch.hive_id,
+
+        "honey_type":
+            batch.honey_type,
+
+        "harvest_date":
+            batch.harvest_date.isoformat(),
+
+        "quantity_kg":
+            batch.quantity_kg
+    }
+
+
+    canonical_metadata = json.dumps(
+
+        current_metadata,
+
+        sort_keys=True,
+
+        separators=(
+            ",",
+            ":"
+        )
+    )
+
+
+    current_hash = hashlib.sha256(
+
+        canonical_metadata.encode(
+            "utf-8"
+        )
+
+    ).hexdigest()
+
+
+    # --------------------------------------------------------
+    # DATABASE HASH
+    # --------------------------------------------------------
+
+    database_hash_matches = (
+
+        current_hash ==
+        batch.metadata_hash
+    )
+
+
+    # --------------------------------------------------------
+    # BLOCKCHAIN HASH
+    # --------------------------------------------------------
+
+    blockchain_hash = None
+
+    blockchain_hash_matches = False
+
+
+    try:
+
+        blockchain_result = (
+
+            verify_batch_on_blockchain(
+                batch_id
+            )
+        )
+
+
+        if isinstance(
+            blockchain_result,
+            dict
+        ):
+
+            blockchain_hash = (
+                blockchain_result.get(
+                    "metadata_hash"
+                )
+            )
+
+
+        elif isinstance(
+            blockchain_result,
+            (list, tuple)
+        ):
+
+            if len(blockchain_result) >= 2:
+
+                blockchain_hash = (
+                    blockchain_result[1]
+                )
+
+
+        if blockchain_hash:
+
+            blockchain_hash_matches = (
+
+                blockchain_hash ==
+                batch.metadata_hash
+            )
+
+
+    except Exception:
+
+        blockchain_hash = None
+
+
+    # --------------------------------------------------------
+    # FINAL DECISION
+    # --------------------------------------------------------
 
     integrity_verified = (
+
         database_hash_matches
         and blockchain_hash_matches
     )
 
+
     if integrity_verified:
-        status = "VERIFIED - Database and blockchain data match"
+
+        status = (
+            "VERIFIED - "
+            "Database and blockchain data match"
+        )
+
     else:
-        status = "TAMPER DETECTED - Data does not match blockchain"
+
+        status = (
+            "TAMPER DETECTED - "
+            "Data does not match blockchain"
+        )
+
 
     return {
-        "batch_id": batch_id,
-        "integrity_verified": integrity_verified,
-        "status": status,
-        "current_database_hash": current_hash,
-        "stored_metadata_hash": batch.metadata_hash,
-        "blockchain_hash": blockchain_hash,
-        "database_hash_matches": database_hash_matches,
-        "blockchain_hash_matches": blockchain_hash_matches,
-        "network": "Sepolia Testnet",
-        "contract_address": "0x8B12321F29947DE607e16218D8A582756E77E61C"
+
+        "batch_id":
+            batch_id,
+
+        "integrity_verified":
+            integrity_verified,
+
+        "status":
+            status,
+
+        "current_database_hash":
+            current_hash,
+
+        "stored_metadata_hash":
+            batch.metadata_hash,
+
+        "blockchain_hash":
+            blockchain_hash,
+
+        "database_hash_matches":
+            database_hash_matches,
+
+        "blockchain_hash_matches":
+            blockchain_hash_matches,
+
+        "network":
+            "Sepolia Testnet",
+
+        "contract_address":
+            (
+                "0x8B12321F29947DE607e16218D8A582756E77E61C"
+            )
+    }
+
+
+# ============================================================
+# QR CODE ENDPOINT
+# ============================================================
+
+@app.get("/api/batches/{batch_id}/qr")
+def get_qr_data(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    return {
+
+        "batch_id":
+            batch.batch_id,
+
+        "passport_url":
+            f"/api/passport/{batch.batch_id}",
+
+        "verification_url":
+            f"/api/batches/"
+            f"{batch.batch_id}/integrity",
+
+        "message":
+            (
+                "Scan this QR code to view "
+                "the Honey Passport"
+            )
     }
 
 
@@ -1060,11 +2071,22 @@ def check_batch_integrity(
 # HEALTH CHECK
 # ============================================================
 
-@app.get("/api/health")
+@app.get("/health")
 def health_check():
 
     return {
-        "status": "healthy",
-        "service": "HoneyChain Backend",
-        "blockchain": "Sepolia Testnet"
+
+        "status":
+            "healthy",
+
+        "service":
+            "HoneyChain API",
+
+        "blockchain":
+            "Sepolia Testnet",
+
+        "contract":
+            (
+                "0x8B12321F29947DE607e16218D8A582756E77E61C"
+            )
     }
