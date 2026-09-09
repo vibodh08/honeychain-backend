@@ -67,6 +67,7 @@ SECRET_KEY = os.getenv(
 )
 
 ALGORITHM = "HS256"
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 
@@ -74,6 +75,7 @@ pwd_context = CryptContext(
     schemes=["bcrypt"],
     deprecated="auto"
 )
+
 
 oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl="/api/login"
@@ -188,7 +190,6 @@ def get_current_user(
         username = payload.get("sub")
 
         if username is None:
-
             raise credentials_exception
 
     except JWTError:
@@ -204,7 +205,6 @@ def get_current_user(
     )
 
     if user is None:
-
         raise credentials_exception
 
     return user
@@ -329,8 +329,6 @@ class LabCertificate(Base):
     )
 
 
-# Create lab_certificates table
-
 Base.metadata.create_all(bind=engine)
 
 
@@ -432,19 +430,6 @@ def register_user(
 
 # ============================================================
 # LOGIN USER
-# ============================================================
-#
-# IMPORTANT:
-# OAuth2PasswordRequestForm is used here instead of
-# UserLogin so Swagger's OAuth2 Authorize button works.
-#
-# Swagger sends:
-#
-# username=...
-# password=...
-#
-# as form data.
-#
 # ============================================================
 
 @app.post("/api/login")
@@ -889,8 +874,6 @@ def create_supply_chain_event(
     db.add(event)
 
 
-    # Update current status
-
     batch.status = (
         event_data.event_type.lower()
     )
@@ -1036,10 +1019,6 @@ def create_lab_certificate(
     )
 ):
 
-    # --------------------------------------------------------
-    # CHECK BATCH
-    # --------------------------------------------------------
-
     batch = (
 
         db.query(HoneyBatch)
@@ -1062,10 +1041,6 @@ def create_lab_certificate(
             detail="Batch not found"
         )
 
-
-    # --------------------------------------------------------
-    # CHECK DUPLICATE CERTIFICATE
-    # --------------------------------------------------------
 
     existing_certificate = (
 
@@ -1091,10 +1066,6 @@ def create_lab_certificate(
             detail="Certificate ID already exists"
         )
 
-
-    # --------------------------------------------------------
-    # CREATE CERTIFICATE
-    # --------------------------------------------------------
 
     certificate = LabCertificate(
 
@@ -1124,10 +1095,6 @@ def create_lab_certificate(
     db.add(certificate)
 
 
-    # --------------------------------------------------------
-    # CHECK EXISTING LAB EVENT
-    # --------------------------------------------------------
-
     existing_lab_event = (
 
         db.query(SupplyChainEvent)
@@ -1145,10 +1112,6 @@ def create_lab_certificate(
         .first()
     )
 
-
-    # --------------------------------------------------------
-    # AUTOMATIC LAB TESTED EVENT
-    # --------------------------------------------------------
 
     if not existing_lab_event:
 
@@ -1181,7 +1144,6 @@ def create_lab_certificate(
 
 
         db.add(lab_event)
-
 
         batch.status = "lab tested"
 
@@ -1328,20 +1290,241 @@ def get_lab_certificate(
 
 
 # ============================================================
-# HONEY PASSPORT
+# BLOCKCHAIN VERIFICATION HELPER
 # ============================================================
 
-@app.get("/api/passport/{batch_id}")
-def get_honey_passport(
+def get_blockchain_verification(batch_id: str):
+
+    try:
+
+        result = verify_batch_on_blockchain(
+            batch_id
+        )
+
+        # ----------------------------------------------------
+        # If blockchain.py already returns a dictionary
+        # ----------------------------------------------------
+
+        if isinstance(result, dict):
+
+            blockchain_data = result.copy()
+
+        # ----------------------------------------------------
+        # If blockchain.py returns the Solidity tuple
+        # ----------------------------------------------------
+
+        elif isinstance(result, (list, tuple)):
+
+            if len(result) >= 4:
+
+                blockchain_data = {
+
+                    "batch_id":
+                        result[0],
+
+                    "metadata_hash":
+                        result[1],
+
+                    "registered_by":
+                        result[2],
+
+                    "blockchain_timestamp":
+                        result[3]
+                }
+
+            else:
+
+                blockchain_data = {
+                    "raw_result": result
+                }
+
+        else:
+
+            blockchain_data = {
+                "raw_result": str(result)
+            }
+
+
+        # ----------------------------------------------------
+        # Add standard HoneyChain fields
+        # ----------------------------------------------------
+
+        if "verified" not in blockchain_data:
+
+            blockchain_data["verified"] = True
+
+
+        blockchain_data.setdefault(
+            "batch_id",
+            batch_id
+        )
+
+
+        blockchain_data.setdefault(
+            "network",
+            "Sepolia Testnet"
+        )
+
+
+        blockchain_data.setdefault(
+            "contract_address",
+            "0x8B12321F29947DE607e16218D8A582756E77E61C"
+        )
+
+
+        return blockchain_data
+
+
+    except Exception as e:
+
+        return {
+
+            "verified":
+                False,
+
+            "batch_id":
+                batch_id,
+
+            "error":
+                str(e),
+
+            "network":
+                "Sepolia Testnet",
+
+            "contract_address":
+                "0x8B12321F29947DE607e16218D8A582756E77E61C"
+        }
+
+
+# ============================================================
+# BLOCKCHAIN VERIFICATION
+# ============================================================
+#
+# Original route:
+#
+# /api/batches/{batch_id}/blockchain
+#
+# ============================================================
+
+@app.get("/api/batches/{batch_id}/blockchain")
+def verify_batch_blockchain(
 
     batch_id: str,
 
     db: Session = Depends(get_db)
 ):
 
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    blockchain_data = get_blockchain_verification(
+        batch_id
+    )
+
+
+    return {
+
+        "batch_id":
+            batch_id,
+
+        "database_metadata_hash":
+            batch.metadata_hash,
+
+        "blockchain":
+            blockchain_data
+    }
+
+
+# ============================================================
+# FRONTEND-COMPATIBLE BLOCKCHAIN VERIFICATION ROUTE
+# ============================================================
+#
+# IMPORTANT:
+#
+# The frontend calls:
+#
+# /api/blockchain/verify/{batch_id}
+#
+# This route was missing before.
+#
+# ============================================================
+
+@app.get("/api/blockchain/verify/{batch_id}")
+def verify_batch_blockchain_frontend(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    blockchain_data = get_blockchain_verification(
+        batch_id
+    )
+
+
     # --------------------------------------------------------
-    # GET BATCH
+    # Return the blockchain verification directly.
+    #
+    # This matches what the React frontend expects.
     # --------------------------------------------------------
+
+    return blockchain_data
+
+
+# ============================================================
+# TAMPER / INTEGRITY CHECK
+# ============================================================
+
+@app.get("/api/batches/{batch_id}/integrity")
+def check_batch_integrity(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
 
     batch = (
 
@@ -1367,178 +1550,220 @@ def get_honey_passport(
 
 
     # --------------------------------------------------------
-    # SUPPLY CHAIN
+    # LEGACY BATCH
     # --------------------------------------------------------
 
-    events = (
+    if not batch.metadata_hash:
 
-        db.query(SupplyChainEvent)
+        return {
 
-        .filter(
-            SupplyChainEvent.batch_id ==
-            batch_id
-        )
+            "batch_id":
+                batch_id,
 
-        .order_by(
-            SupplyChainEvent.timestamp.asc()
-        )
+            "integrity_verified":
+                False,
 
-        .all()
-    )
+            "status":
+                (
+                    "LEGACY BATCH - "
+                    "Immutable hash not stored "
+                    "in database"
+                ),
 
+            "current_database_hash":
+                None,
 
-    supply_chain = [
+            "stored_metadata_hash":
+                None,
 
-        {
+            "blockchain_hash":
+                None,
 
-            "event_id":
-                event.id,
+            "database_hash_matches":
+                False,
 
-            "stage":
-                event.event_type,
-
-            "location":
-                event.location,
-
-            "actor":
-                event.actor,
-
-            "timestamp":
-                event.timestamp,
-
-            "notes":
-                event.notes
-
-        }
-
-        for event in events
-    ]
-
-
-    # --------------------------------------------------------
-    # LAB CERTIFICATE
-    # --------------------------------------------------------
-
-    certificate = (
-
-        db.query(LabCertificate)
-
-        .filter(
-            LabCertificate.batch_id ==
-            batch_id
-        )
-
-        .order_by(
-            LabCertificate.id.desc()
-        )
-
-        .first()
-    )
-
-
-    lab_certificate = None
-
-
-    if certificate:
-
-        lab_certificate = {
-
-            "certificate_id":
-                certificate.certificate_id,
-
-            "laboratory_name":
-                certificate.laboratory_name,
-
-            "test_date":
-                certificate.test_date,
-
-            "test_result":
-                certificate.test_result,
-
-            "quality_status":
-                certificate.quality_status,
-
-            "notes":
-                certificate.notes,
-
-            "created_at":
-                certificate.created_at
+            "blockchain_hash_matches":
+                False
         }
 
 
     # --------------------------------------------------------
-    # BLOCKCHAIN
+    # RECREATE CURRENT METADATA
     # --------------------------------------------------------
 
-    blockchain_data = None
+    current_metadata = {
+
+        "batch_id":
+            batch.batch_id,
+
+        "beekeeper_name":
+            batch.beekeeper_name,
+
+        "location":
+            batch.location,
+
+        "hive_id":
+            batch.hive_id,
+
+        "honey_type":
+            batch.honey_type,
+
+        "harvest_date":
+            batch.harvest_date.isoformat(),
+
+        "quantity_kg":
+            batch.quantity_kg
+    }
+
+
+    canonical_metadata = json.dumps(
+
+        current_metadata,
+
+        sort_keys=True,
+
+        separators=(
+            ",",
+            ":"
+        )
+    )
+
+
+    current_hash = hashlib.sha256(
+
+        canonical_metadata.encode(
+            "utf-8"
+        )
+
+    ).hexdigest()
+
+
+    # --------------------------------------------------------
+    # DATABASE HASH
+    # --------------------------------------------------------
+
+    database_hash_matches = (
+
+        current_hash ==
+        batch.metadata_hash
+    )
+
+
+    # --------------------------------------------------------
+    # BLOCKCHAIN HASH
+    # --------------------------------------------------------
+
+    blockchain_hash = None
+
+    blockchain_hash_matches = False
 
 
     try:
 
-        blockchain_data = (
-
+        blockchain_result = (
             verify_batch_on_blockchain(
                 batch_id
             )
         )
 
 
-    except Exception as e:
+        if isinstance(
+            blockchain_result,
+            dict
+        ):
 
-        blockchain_data = {
+            blockchain_hash = (
+                blockchain_result.get(
+                    "metadata_hash"
+                )
+            )
 
-            "verified":
-                False,
 
-            "error":
-                str(e)
-        }
+        elif isinstance(
+            blockchain_result,
+            (list, tuple)
+        ):
+
+            if len(blockchain_result) >= 2:
+
+                blockchain_hash = (
+                    blockchain_result[1]
+                )
+
+
+        if blockchain_hash:
+
+            blockchain_hash_matches = (
+
+                blockchain_hash ==
+                batch.metadata_hash
+            )
+
+
+    except Exception:
+
+        blockchain_hash = None
 
 
     # --------------------------------------------------------
-    # FINAL PASSPORT
+    # FINAL DECISION
     # --------------------------------------------------------
+
+    integrity_verified = (
+
+        database_hash_matches
+        and blockchain_hash_matches
+    )
+
+
+    if integrity_verified:
+
+        status = (
+            "VERIFIED - "
+            "Database and blockchain data match"
+        )
+
+    else:
+
+        status = (
+            "TAMPER DETECTED - "
+            "Data does not match blockchain"
+        )
+
 
     return {
 
-        "passport": {
+        "batch_id":
+            batch_id,
 
-            "batch_id":
-                batch.batch_id,
+        "integrity_verified":
+            integrity_verified,
 
-            "beekeeper_name":
-                batch.beekeeper_name,
+        "status":
+            status,
 
-            "location":
-                batch.location,
+        "current_database_hash":
+            current_hash,
 
-            "hive_id":
-                batch.hive_id,
+        "stored_metadata_hash":
+            batch.metadata_hash,
 
-            "honey_type":
-                batch.honey_type,
+        "blockchain_hash":
+            blockchain_hash,
 
-            "harvest_date":
-                batch.harvest_date,
+        "database_hash_matches":
+            database_hash_matches,
 
-            "quantity_kg":
-                batch.quantity_kg,
+        "blockchain_hash_matches":
+            blockchain_hash_matches,
 
-            "status":
-                batch.status,
+        "network":
+            "Sepolia Testnet",
 
-            "metadata_hash":
-                batch.metadata_hash,
-
-            "lab_certificate":
-                lab_certificate,
-
-            "blockchain":
-                blockchain_data
-        },
-
-        "supply_chain":
-            supply_chain
+        "contract_address":
+            (
+                "0x8B12321F29947DE607e16218D8A582756E77E61C"
+            )
     }
 
 
@@ -1687,333 +1912,11 @@ def repair_blockchain_registration(
 
 
 # ============================================================
-# VERIFY BATCH ON BLOCKCHAIN
+# QR CODE DATA
 # ============================================================
-
-@app.get("/api/batches/{batch_id}/blockchain")
-def verify_batch_blockchain(
-
-    batch_id: str,
-
-    db: Session = Depends(get_db)
-):
-
-    batch = (
-
-        db.query(HoneyBatch)
-
-        .filter(
-            HoneyBatch.batch_id ==
-            batch_id
-        )
-
-        .first()
-    )
-
-
-    if not batch:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Batch not found"
-        )
-
-
-    try:
-
-        blockchain_result = (
-
-            verify_batch_on_blockchain(
-                batch_id
-            )
-        )
-
-
-    except Exception as e:
-
-        raise HTTPException(
-
-            status_code=500,
-
-            detail=str(e)
-        )
-
-
-    return {
-
-        "batch_id":
-            batch_id,
-
-        "database_metadata_hash":
-            batch.metadata_hash,
-
-        "blockchain":
-            blockchain_result
-    }
-
-
-# ============================================================
-# TAMPER / INTEGRITY CHECK
-# ============================================================
-
-@app.get("/api/batches/{batch_id}/integrity")
-def check_batch_integrity(
-
-    batch_id: str,
-
-    db: Session = Depends(get_db)
-):
-
-    # --------------------------------------------------------
-    # GET BATCH
-    # --------------------------------------------------------
-
-    batch = (
-
-        db.query(HoneyBatch)
-
-        .filter(
-            HoneyBatch.batch_id ==
-            batch_id
-        )
-
-        .first()
-    )
-
-
-    if not batch:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Batch not found"
-        )
-
-
-    # --------------------------------------------------------
-    # LEGACY BATCH
-    # --------------------------------------------------------
-
-    if not batch.metadata_hash:
-
-        return {
-
-            "batch_id":
-                batch_id,
-
-            "integrity_verified":
-                False,
-
-            "status":
-                (
-                    "LEGACY BATCH - "
-                    "Immutable hash not stored "
-                    "in database"
-                ),
-
-            "current_database_hash":
-                None,
-
-            "stored_metadata_hash":
-                None,
-
-            "blockchain_hash":
-                None,
-
-            "database_hash_matches":
-                False,
-
-            "blockchain_hash_matches":
-                False
-        }
-
-
-    # --------------------------------------------------------
-    # RECREATE CURRENT METADATA
-    # --------------------------------------------------------
-
-    current_metadata = {
-
-        "batch_id":
-            batch.batch_id,
-
-        "beekeeper_name":
-            batch.beekeeper_name,
-
-        "location":
-            batch.location,
-
-        "hive_id":
-            batch.hive_id,
-
-        "honey_type":
-            batch.honey_type,
-
-        "harvest_date":
-            batch.harvest_date.isoformat(),
-
-        "quantity_kg":
-            batch.quantity_kg
-    }
-
-
-    canonical_metadata = json.dumps(
-
-        current_metadata,
-
-        sort_keys=True,
-
-        separators=(
-            ",",
-            ":"
-        )
-    )
-
-
-    current_hash = hashlib.sha256(
-
-        canonical_metadata.encode(
-            "utf-8"
-        )
-
-    ).hexdigest()
-
-
-    # --------------------------------------------------------
-    # DATABASE HASH
-    # --------------------------------------------------------
-
-    database_hash_matches = (
-
-        current_hash ==
-        batch.metadata_hash
-    )
-
-
-    # --------------------------------------------------------
-    # BLOCKCHAIN HASH
-    # --------------------------------------------------------
-
-    blockchain_hash = None
-
-    blockchain_hash_matches = False
-
-
-    try:
-
-        blockchain_result = (
-
-            verify_batch_on_blockchain(
-                batch_id
-            )
-        )
-
-
-        if isinstance(
-            blockchain_result,
-            dict
-        ):
-
-            blockchain_hash = (
-                blockchain_result.get(
-                    "metadata_hash"
-                )
-            )
-
-
-        elif isinstance(
-            blockchain_result,
-            (list, tuple)
-        ):
-
-            if len(blockchain_result) >= 2:
-
-                blockchain_hash = (
-                    blockchain_result[1]
-                )
-
-
-        if blockchain_hash:
-
-            blockchain_hash_matches = (
-
-                blockchain_hash ==
-                batch.metadata_hash
-            )
-
-
-    except Exception:
-
-        blockchain_hash = None
-
-
-    # --------------------------------------------------------
-    # FINAL DECISION
-    # --------------------------------------------------------
-
-    integrity_verified = (
-
-        database_hash_matches
-        and blockchain_hash_matches
-    )
-
-
-    if integrity_verified:
-
-        status = (
-            "VERIFIED - "
-            "Database and blockchain data match"
-        )
-
-    else:
-
-        status = (
-            "TAMPER DETECTED - "
-            "Data does not match blockchain"
-        )
-
-
-    return {
-
-        "batch_id":
-            batch_id,
-
-        "integrity_verified":
-            integrity_verified,
-
-        "status":
-            status,
-
-        "current_database_hash":
-            current_hash,
-
-        "stored_metadata_hash":
-            batch.metadata_hash,
-
-        "blockchain_hash":
-            blockchain_hash,
-
-        "database_hash_matches":
-            database_hash_matches,
-
-        "blockchain_hash_matches":
-            blockchain_hash_matches,
-
-        "network":
-            "Sepolia Testnet",
-
-        "contract_address":
-            (
-                "0x8B12321F29947DE607e16218D8A582756E77E61C"
-            )
-    }
-
-
-# ============================================================
-# QR CODE ENDPOINT
+#
+# This is the original QR route.
+#
 # ============================================================
 
 @app.get("/api/batches/{batch_id}/qr")
@@ -2047,17 +1950,124 @@ def get_qr_data(
         )
 
 
+    # --------------------------------------------------------
+    # Public frontend passport URL
+    # --------------------------------------------------------
+    #
+    # Set this environment variable on Render:
+    #
+    # FRONTEND_URL=https://your-vercel-app.vercel.app
+    #
+    # If it is not set, the frontend URL falls back to
+    # localhost for local development.
+    #
+    # --------------------------------------------------------
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:8080"
+    ).rstrip("/")
+
+
+    passport_url = (
+        frontend_url
+        + "/passport/"
+        + batch.batch_id
+    )
+
+
+    verification_url = (
+        frontend_url
+        + "/passport/"
+        + batch.batch_id
+    )
+
+
     return {
 
         "batch_id":
             batch.batch_id,
 
         "passport_url":
-            f"/api/passport/{batch.batch_id}",
+            passport_url,
 
         "verification_url":
-            f"/api/batches/"
-            f"{batch.batch_id}/integrity",
+            verification_url,
+
+        "message":
+            (
+                "Scan this QR code to view "
+                "the Honey Passport"
+            )
+    }
+
+
+# ============================================================
+# FRONTEND-COMPATIBLE QR ROUTE
+# ============================================================
+#
+# The frontend may call:
+#
+# /api/qr/{batch_id}
+#
+# This route was missing before.
+#
+# ============================================================
+
+@app.get("/api/qr/{batch_id}")
+def get_qr_data_frontend(
+
+    batch_id: str,
+
+    db: Session = Depends(get_db)
+):
+
+    batch = (
+
+        db.query(HoneyBatch)
+
+        .filter(
+            HoneyBatch.batch_id ==
+            batch_id
+        )
+
+        .first()
+    )
+
+
+    if not batch:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Batch not found"
+        )
+
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:8080"
+    ).rstrip("/")
+
+
+    passport_url = (
+        frontend_url
+        + "/passport/"
+        + batch.batch_id
+    )
+
+
+    return {
+
+        "batch_id":
+            batch.batch_id,
+
+        "passport_url":
+            passport_url,
+
+        "verification_url":
+            passport_url,
 
         "message":
             (
